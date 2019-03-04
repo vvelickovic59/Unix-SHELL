@@ -32,7 +32,7 @@ function wait_for_task
 #                            sleep 1
                             loc_command="${@//\{\}/$line}"
                             loc_command="${loc_command[@]//\[\]/$loc_child}"
-                            ${loc_command[@]}
+                            eval ${loc_command[@]}
                             echo $? > $fifo_parent
                         }
    done
