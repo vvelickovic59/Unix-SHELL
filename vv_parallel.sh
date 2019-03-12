@@ -44,10 +44,29 @@ function wait_for_task
 #                            sleep 1
                             loc_command=()
                             for i in ${loc_parameters[@]}; do
-                               [ -z "${i##*\{*}" ] && {   for j in ${line}; do
-                                                             loc_command+=( "${i//\{\}/$j}" )
-                                                          done
-                                                      } || loc_command+=( $i )
+                               if [ -z "${i##*\{\}*}" ]; then
+                                  for j in ${line}; do
+                                     loc_command+=( "${i//\{\}/$j}" )
+                                  done
+                               elif [ -z "${i##*\{%\}*}" ]; then
+                                  for j in ${line}; do
+                                     loc_command+=( "${i//\{%\}/"${j%.*}"}" )
+                                  done
+                               elif [ -z "${i##*\{\/\}*}" ]; then
+                                  for j in ${line}; do
+                                     loc_command+=( "${i//\{\/\}/"$(basename $j)"}" )
+                                  done
+                               elif [ -z "${i##*\{\/%\}*}" ]; then
+                                  for j in ${line}; do
+                                     loc_command+=( "${i//\{\/%\}/"$(basename "${j%.*}")"}" )
+                                  done
+                               elif [ -z "${i##*\{\/\/\}*}" ]; then
+                                  for j in ${line}; do
+                                     loc_command+=( "${i//\{\/\/\}/"$(dirname $j)"}" )
+                                  done
+                               else
+                                  loc_command+=( $i )
+                               fi
                             done
 
                             eval ${loc_command[@]}
@@ -97,8 +116,12 @@ function usage
    echo "   - -l                           - (OPTIONAL) set process log ON"
    echo "   - command                      - (OPTIONAL) command or script to be executed"
    echo "   - command_parameters...        - list of parameters expected by 'command'"
-   echo "                                    {} (if used in a list of command parameters) in a run-time will be substituted with the \"line\" value read by parent and sent to child process"
-   echo "                                    [] (if used in a list of command parameters) in a run-time will be substituted with the child ID"
+   echo "                                    []   (if used in a list of command parameters) in a run-time will be substituted with the child ID"
+   echo "                                    {}   (if used in a list of command parameters) in a run-time will be substituted with the \"line\" value sent by parent to child process"
+   echo "                                    {%}  (if used in a list of command parameters) in a run-time will be substituted with the \"line\" without extension"
+   echo "                                    {/}  (if used in a list of command parameters) in a run-time will be substituted with the \"line\" basename"
+   echo "                                    {/%} (if used in a list of command parameters) in a run-time will be substituted with the \"line\" basename without extension"
+   echo "                                    {/}  (if used in a list of command parameters) in a run-time will be substituted with the \"line\" dirname"
    echo " "
    echo "   EXAMPLE: seq 100 | $0 3 echo Parameters passed to child#[] are: {}"
    echo "            The above command will generate a sequence of 100 numbers and call $0 with 3 parallel process, each child process will execute 'echo'"
@@ -162,11 +185,10 @@ while [ $i -le $parallel ]; do
    wait_for_task $i $@ &
    ((i++))
 done
-child_number=$((i-1))
 
 exec 4> $fifo_child
 
-i=1; j=0; loc_seq_arr=(); loc_xargs_count=1
+child_count=1; progress_count=0; loc_seq_arr=(); loc_xargs_count=1
 while IFS= read loc_seq; do
 
    ###################### SUPPORT FOR MULTIPLE ARGUMENTS #################################
@@ -174,46 +196,45 @@ while IFS= read loc_seq; do
    ((loc_xargs_count++))
    [ $loc_xargs_count -le $loc_xargs ] && continue
 
-   [ $i -gt $parallel ] && {   while :; do
-                                  ################### READ PARENT PIPE ###################
-                                  IFS= read -u 3 line
+   [ $child_count -gt $parallel ] && {   while :; do
+                                            ################### READ PARENT PIPE #########
+                                            IFS= read -u 3 line
 
-                                  ################ CLEAN-UP IF REQUIRED AND QUIT #########
-                                  [ "$line" = 'quit' ] && break
+                                            ############# CLEAN-UP IF REQUIRED AND QUIT ##
+                                            [ "$line" = 'quit' ] && break
 
-                                  if [ "$line" = 'more' ]; then
-                                     ################ ADD NEW CHILD PROCESS ##############
-                                     ((parallel++))
-                                     ((child_number++))
-                                     wait_for_task $i $@ &
-                                     break
-                                  elif [ "$line" = 'less' ]; then
-                                     ################ REMOVE ONE CHILD PROCESS ###########
-                                     echo quit > $fifo_child
-                                     ((parallel--))
-                                     [ $parallel -lt 1 ] && {   line="quit"
-                                                                break
-                                                            }
-                                  else
-                                     ((i--))
-                                     break
-                                  fi
-                               done
-                           }
+                                            if [ "$line" = 'more' ]; then
+                                               ################ ADD NEW CHILD PROCESS ####
+                                               ((parallel++))
+                                               wait_for_task $child_count $@ &
+                                               break
+                                            elif [ "$line" = 'less' ]; then
+                                               ############## REMOVE ONE CHILD PROCESS ###
+                                               echo quit > $fifo_child
+                                               ((parallel--))
+                                               [ $parallel -lt 1 ] && {   line="quit"
+                                                                          break
+                                                                      }
+                                            else
+                                               ((child_count--))
+                                               break
+                                            fi
+                                         done
+                                     }
 
    [ "$line" = 'quit' ] && break
 
    ###################### DISTRIBUTE TASKS TO CHILD PROCESSES ############################
    echo ${loc_seq_arr[@]} > $fifo_child
-   loc_seq_arr=(); loc_xargs_count=1; ((i++)); ((j++))
+   loc_seq_arr=(); loc_xargs_count=1; ((child_count++)); ((progress_count++))
 
    ###################### PRINT PROGRESS #################################################
-   [ $progress -gt 1 ] && [ $(( $j % $progress )) -eq 0 ] && printf $j>&2 || [ $progress -gt 0 ] && printf $progress_bar>&2
+   [ $progress -gt 1 ] && [ $(( $progress_count % $progress )) -eq 0 ] && printf $progress_count>&2 || [ $progress -gt 0 ] && printf $progress_bar>&2
 done
 
 ######################### DISTRIBUTE REMAINING TASKS TO CHILD PROCESSES ##################
 [ ${#loc_seq_arr[@]} -eq 0 ] || echo ${loc_seq_arr[@]} > $fifo_child
 
-[ $progress -gt 0 ] && printf "%s\n" $j>&2
+[ $progress -gt 0 ] && printf "%s\n" $progress_count>&2
 
 vv_exit
